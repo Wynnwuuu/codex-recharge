@@ -8,9 +8,11 @@ export default defineConfig({
     if(req.method!=='GET'){res.statusCode=405;res.end();return;}
     if(req.headers.origin&&req.headers.origin!==`http://${req.headers.host}`){res.statusCode=403;res.end();return;}
     try{
-     const {readStatus}=await import('./telemetry/status.mjs');
+     const {readTaskStatus,refreshUsage}=await import('./telemetry/status.mjs');
+     // Quota runs in the background at its own cadence, so task reads stay fast.
+     void refreshUsage({maxAgeMs:30000});
      res.setHeader('Content-Type','application/json');res.setHeader('Cache-Control','no-store');
-     res.end(JSON.stringify(await readStatus()));
+     res.end(JSON.stringify(await readTaskStatus()));
     }catch{res.statusCode=503;res.end('{"remainingPercent":null,"activeTasks":null,"usageStatus":"unavailable","tasksStatus":"unavailable"}');}
    });
   }

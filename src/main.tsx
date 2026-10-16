@@ -19,11 +19,12 @@ function App(){
  const [desktopHeight,setDesktopHeight]=useState(window.__codexDesktopHeight??240);
  const companionRef=useRef<HTMLElement>(null);
  const tooltipRef=useRef<HTMLDivElement>(null);
- const down=useRef<{x:number;y:number}|null>(null);
+ const down=useRef<{pointerId:number;x:number;y:number;dragged:boolean}|null>(null);
+ const cancelPointer=()=>{if(down.current&&desktop)bridge('drag',{phase:'end'});down.current=null;};
  useEffect(()=>{
   const handler=(event:Event)=>setStatus((event as CustomEvent<Status>).detail);
   window.addEventListener('codex-status',handler);bridge('getStatus');
-  if(!desktop){const load=()=>fetch('/api/status').then(r=>r.ok?r.json():Promise.reject()).then(setStatus).catch(()=>{});load();const timer=setInterval(load,30000);return()=>{clearInterval(timer);window.removeEventListener('codex-status',handler);};}
+  if(!desktop){const load=()=>fetch('/api/status').then(r=>r.ok?r.json():Promise.reject()).then(setStatus).catch(()=>{});load();const timer=setInterval(load,1000);return()=>{clearInterval(timer);window.removeEventListener('codex-status',handler);};}
   return()=>window.removeEventListener('codex-status',handler);
  },[desktop]);
  useEffect(()=>{
@@ -79,7 +80,25 @@ function App(){
  return <main className={desktop?'desktop':'preview'} data-placement={placement} data-hovered={hovered} style={desktop?{height:desktopHeight}:undefined}>
  {!desktop&&<header><span className="brand-mark">◈</span><span>CODEX RECHARGE</span><span className="local-badge">本机运行</span></header>}
  <section ref={companionRef} className="companion" data-placement={placement} data-usage-status={status.usageStatus} onPointerEnter={()=>{if(desktop){bridge('getLayout');bridge('getHover');}}} onFocus={()=>{if(desktop)bridge('getLayout');}}>
- <button className="pet" aria-label={`打开 Codex，${usage}，${tasks}`} onPointerDown={e=>{down.current={x:e.screenX,y:e.screenY};if(desktop)bridge('drag',{phase:'start'});}} onPointerUp={e=>{if(desktop)bridge('drag',{phase:'end'});const d=down.current;down.current=null;if(d&&Math.hypot(e.screenX-d.x,e.screenY-d.y)<5){openCodex();}}} onKeyDown={e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();openCodex();}}}>
+ <button className="pet" aria-label={`打开 Codex，${usage}，${tasks}`} onPointerDown={e=>{
+  if(!e.isPrimary||e.button!==0)return;
+  down.current={pointerId:e.pointerId,x:e.screenX,y:e.screenY,dragged:false};
+  e.currentTarget.setPointerCapture(e.pointerId);
+  if(desktop)bridge('drag',{phase:'start'});
+ }} onPointerMove={e=>{
+  const d=down.current;
+  if(d?.pointerId===e.pointerId&&Math.hypot(e.screenX-d.x,e.screenY-d.y)>=5)d.dragged=true;
+ }} onPointerUp={e=>{
+  const d=down.current;
+  if(!d||d.pointerId!==e.pointerId)return;
+  cancelPointer();
+  if(e.currentTarget.hasPointerCapture(e.pointerId))e.currentTarget.releasePointerCapture(e.pointerId);
+  const bounds=e.currentTarget.getBoundingClientRect();
+  const inside=e.clientX>=bounds.left&&e.clientX<=bounds.right&&e.clientY>=bounds.top&&e.clientY<=bounds.bottom;
+  if(!d.dragged&&Math.hypot(e.screenX-d.x,e.screenY-d.y)<5&&inside)openCodex();
+ }} onPointerCancel={cancelPointer} onLostPointerCapture={cancelPointer} onKeyDown={e=>{
+  if(e.key==='Enter'||e.key===' '){e.preventDefault();if(!e.repeat)openCodex();}
+ }}>
  <Player component={RechargeComposition} compositionWidth={720} compositionHeight={540} durationInFrames={900} fps={60} autoPlay loop controls={false} clickToPlay={false} doubleClickToFullscreen={false} spaceKeyToPlayOrPause={false} inputProps={{mode:demo?'reference':'usage',remainingPercent:status.remainingPercent,transparent:desktop,compact:true}} style={{width:'100%',height:'100%',pointerEvents:'none'}}/>
  </button>
  <div ref={tooltipRef} className="tooltip" role="status"><div className="tooltip-title"><i className={status.activeTasks?'busy':'idle'}/>{tasks}</div><div>{usage}</div>{status.windows?.map((w,i)=><small key={i}>{w.label} · {Math.round(w.remainingPercent)}% 剩余</small>)}<small>点击打开 Codex · 拖动调整位置</small></div>

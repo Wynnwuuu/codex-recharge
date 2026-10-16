@@ -9,6 +9,16 @@ final class CompanionPanel: NSPanel {
     override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect { frameRect }
 }
 
+final class CompanionWebView: WKWebView {
+    var firstMouseObserver: ((NSEvent?) -> Void)?
+    // The floating panel is usually inactive. Deliver its first mouse-down to
+    // React instead of consuming it merely to focus the web view.
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        firstMouseObserver?(event)
+        return true
+    }
+}
+
 final class DesktopCompanion: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavigationDelegate {
     private var panel: CompanionPanel!
     private var webView: WKWebView!
@@ -49,13 +59,22 @@ final class DesktopCompanion: NSObject, NSApplicationDelegate, WKScriptMessageHa
     private let worker = DispatchQueue(label: "cc.motionface.codex-recharge.telemetry", qos: .utility)
     private let arguments = CommandLine.arguments
     private var selfTest: Bool { arguments.contains("--self-test") }
-    private var diagnosticRun: Bool { selfTest || arguments.contains("--placement-test") || arguments.contains("--hover-test") || argumentValue("--test-placement") != nil }
+    private var interactionTest: Bool { arguments.contains("--interaction-test") }
+    private var diagnosticRun: Bool { selfTest || interactionTest || arguments.contains("--placement-test") || arguments.contains("--hover-test") || argumentValue("--test-placement") != nil }
+    private var interactionDiagnostics: [String: Any] = [
+        "ready": false, "appActive": false, "panelKey": false,
+        "firstMouseCalls": 0, "firstMouseWhileInactive": false,
+        "bridgeOpenRequests": 0, "workspaceOpenAttempts": 0,
+        "workspaceOpenCompletions": 0, "workspaceOpenSucceeded": false,
+        "workspaceOpenedCodex": false, "codexFrontmost": false, "fallbackUsed": false
+    ]
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         makePanel()
         startHoverTracking()
         makeMenu()
+        recordInteraction()
         loadFrontend()
         statusTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
             self?.refreshStatus()
@@ -99,7 +118,16 @@ final class DesktopCompanion: NSObject, NSApplicationDelegate, WKScriptMessageHa
         let configuration = WKWebViewConfiguration()
         configuration.userContentController = contentController
         configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
-        webView = WKWebView(frame: NSRect(origin: .zero, size: size), configuration: configuration)
+        let companionWebView = CompanionWebView(frame: NSRect(origin: .zero, size: size), configuration: configuration)
+        if interactionTest {
+            companionWebView.firstMouseObserver = { [weak self] event in
+                guard let self = self, event?.type == .leftMouseDown else { return }
+                let inactive = self.interactionDiagnostics["firstMouseWhileInactive"] as? Bool == true || !NSApp.isActive
+                self.recordInteraction(["firstMouseCalls": self.interactionCount("firstMouseCalls") + 1,
+                    "firstMouseWhileInactive": inactive])
+            }
+        }
+        webView = companionWebView
         webView.autoresizingMask = [.width, .height]
         webView.navigationDelegate = self
         webView.setValue(false, forKey: "drawsBackground")
@@ -144,6 +172,7 @@ final class DesktopCompanion: NSObject, NSApplicationDelegate, WKScriptMessageHa
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         publishLayout()
         refreshHover(forcePublish: true)
+        recordInteraction(["ready": true])
         if let status = cachedStatus { publish(status) }
         refreshStatus()
         if selfTest || argumentValue("--screenshot") != nil {
@@ -166,7 +195,9 @@ final class DesktopCompanion: NSObject, NSApplicationDelegate, WKScriptMessageHa
         guard message.frameInfo.isMainFrame, message.name == "codex",
               let body = message.body as? [String: Any], let action = body["action"] as? String else { return }
         switch action {
-        case "openCodex": openCodex()
+        case "openCodex":
+            recordInteraction(["bridgeOpenRequests": interactionCount("bridgeOpenRequests") + 1])
+            openCodex()
         case "getLayout": updateLayout()
         case "getHover": refreshHover(forcePublish: true)
         case "setHoverRegion":
@@ -356,7 +387,7 @@ final class DesktopCompanion: NSObject, NSApplicationDelegate, WKScriptMessageHa
             .appendingPathComponent("cc.motionface.codex-recharge", isDirectory: true)
         let process = Process()
         process.executableURL = node
-        process.arguments = [script.path, "--watch", "--interval", "30000"]
+        process.arguments = [script.path, "--watch", "--interval", "30000", "--task-interval", "1000"]
         var environment = ProcessInfo.processInfo.environment
         environment["CODEX_RECHARGE_DATA_DIR"] = support.path
         process.environment = environment
@@ -420,11 +451,43 @@ final class DesktopCompanion: NSObject, NSApplicationDelegate, WKScriptMessageHa
 
     @objc private func openCodex() {
         let workspace = NSWorkspace.shared
+        recordInteraction(["workspaceOpenAttempts": interactionCount("workspaceOpenAttempts") + 1])
         if let applicationURL = workspace.urlForApplication(withBundleIdentifier: "com.openai.codex") {
             let configuration = NSWorkspace.OpenConfiguration()
             configuration.activates = true
-            workspace.openApplication(at: applicationURL, configuration: configuration, completionHandler: nil)
-        } else if let url = URL(string: "codex://") { workspace.open(url) }
+            workspace.openApplication(at: applicationURL, configuration: configuration) { [weak self] application, error in
+                DispatchQueue.main.async {
+                    guard let self = self else { return }
+                    self.recordInteraction(["workspaceOpenCompletions": self.interactionCount("workspaceOpenCompletions") + 1,
+                        "workspaceOpenSucceeded": error == nil && application != nil,
+                        "workspaceOpenedCodex": application?.bundleIdentifier == "com.openai.codex"])
+                    if self.interactionTest {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+                            self?.recordInteraction(["codexFrontmost": NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "com.openai.codex"])
+                        }
+                    }
+                }
+            }
+        } else if let url = URL(string: "codex://") {
+            let succeeded = workspace.open(url)
+            recordInteraction(["fallbackUsed": true, "workspaceOpenSucceeded": succeeded])
+        }
+    }
+
+    private func interactionCount(_ key: String) -> Int { interactionDiagnostics[key] as? Int ?? 0 }
+
+    private func recordInteraction(_ updates: [String: Any] = [:]) {
+        guard interactionTest else { return }
+        interactionDiagnostics.merge(updates) { _, updated in updated }
+        interactionDiagnostics["appActive"] = NSApp.isActive
+        interactionDiagnostics["panelKey"] = panel?.isKeyWindow == true
+        guard let data = try? JSONSerialization.data(withJSONObject: interactionDiagnostics, options: [.sortedKeys]) else { return }
+        if let path = argumentValue("--interaction-log") {
+            // Only this opt-in diagnostic mode writes the explicitly supplied
+            // file. The payload contains booleans and counts, never telemetry.
+            do { try data.write(to: URL(fileURLWithPath: path), options: .atomic) }
+            catch { fputs("Interaction diagnostic file could not be written.\n", stderr) }
+        } else if let json = String(data: data, encoding: .utf8) { print("Desktop interaction diagnostics: \(json)") }
     }
 
     @objc private func togglePanel() {

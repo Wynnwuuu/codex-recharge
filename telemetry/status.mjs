@@ -54,8 +54,14 @@ export function createStatusReader({
   const fetchUsage = usageReader || (() => server.readRateLimits());
   let lastUsage = null;
   let lastTasks = null;
+  let usageLive = false;
+  let tasksLive = false;
   let loadCache;
-  let pending;
+  let pendingUsage;
+  let pendingTasks;
+  let pendingStatus;
+  let lastUsageAttempt = -Infinity;
+  let closed = false;
   async function load() {
     if (!cacheFile) return;
     try {
@@ -70,7 +76,7 @@ export function createStatusReader({
     } catch {}
   }
   async function save() {
-    if (!cacheFile || !lastUsage) return;
+    if (closed || !cacheFile || !lastUsage) return;
     try {
       await mkdir(dirname(cacheFile), {recursive: true, mode: 0o700});
       const temp = `${cacheFile}.${process.pid}.tmp`;
@@ -78,53 +84,82 @@ export function createStatusReader({
       await rename(temp, cacheFile);
     } catch {}
   }
-  async function collect() {
+  async function refreshUsage({maxAgeMs = 0} = {}) {
     await (loadCache ||= load());
-    const [usage, tasks] = await Promise.allSettled([fetchUsage(), taskReader()]);
+    if (closed) return;
+    if (pendingUsage) return pendingUsage;
+    if (now() - lastUsageAttempt < maxAgeMs) return;
+    lastUsageAttempt = now();
+    pendingUsage = (async () => {
+      try {
+        const value = await fetchUsage();
+        if (closed) return;
+        lastUsage = {...normalizeRateLimits(value), timestamp: now()};
+        usageLive = true;
+        await save();
+      } catch { usageLive = false; }
+    })().finally(() => { pendingUsage = null; });
+    return pendingUsage;
+  }
+  async function refreshTasks() {
+    await (loadCache ||= load());
+    if (closed) return;
+    if (pendingTasks) return pendingTasks;
+    pendingTasks = (async () => {
+      try {
+        const value = await taskReader();
+        if (closed) return;
+        if (value.tasksStatus !== 'live' || !Number.isSafeInteger(value.activeTasks) || value.activeTasks < 0)
+          throw new Error('TASKS_UNAVAILABLE');
+        lastTasks = {activeTasks: value.activeTasks, timestamp: now()};
+        tasksLive = true;
+      } catch { tasksLive = false; }
+    })().finally(() => { pendingTasks = null; });
+    return pendingTasks;
+  }
+  function snapshot() {
     const timestamp = now();
-    let usageLive = false;
-    if (usage.status === 'fulfilled') {
-      try { lastUsage = {...normalizeRateLimits(usage.value), timestamp}; usageLive = true; }
-      catch {}
-    }
-    let tasksLive = false;
-    if (tasks.status === 'fulfilled' && tasks.value.tasksStatus === 'live' &&
-        Number.isSafeInteger(tasks.value.activeTasks) && tasks.value.activeTasks >= 0) {
-      lastTasks = {activeTasks: tasks.value.activeTasks, timestamp}; tasksLive = true;
-    }
     const usageAvailable = lastUsage && timestamp - lastUsage.timestamp < 24 * 60 * 60 * 1000;
     const tasksAvailable = lastTasks && timestamp - lastTasks.timestamp < 2 * 60 * 1000;
-    const result = {
+    return {
       remainingPercent: usageAvailable ? lastUsage.remainingPercent : null,
       windows: usageAvailable ? lastUsage.windows : [],
       activeTasks: tasksAvailable ? lastTasks.activeTasks : null,
-      usageStatus: usageLive ? 'live' : usageAvailable ? 'stale' : 'unavailable',
-      tasksStatus: tasksLive ? 'live' : tasksAvailable ? 'stale' : 'unavailable',
+      usageStatus: usageAvailable ? usageLive ? 'live' : 'stale' : 'unavailable',
+      tasksStatus: tasksAvailable ? tasksLive ? 'live' : 'stale' : 'unavailable',
       updatedAt: new Date(timestamp).toISOString(),
       usageUpdatedAt: usageAvailable ? new Date(lastUsage.timestamp).toISOString() : null,
       tasksUpdatedAt: tasksAvailable ? new Date(lastTasks.timestamp).toISOString() : null,
       source: {
-        usage: usageLive || usageAvailable ? 'codex-app-server-account-rate-limits' : 'unavailable',
-        tasks: tasksLive || tasksAvailable ? 'readonly-sqlite-and-held-writer-locks' : 'unavailable',
+        usage: usageAvailable ? 'codex-app-server-account-rate-limits' : 'unavailable',
+        tasks: tasksAvailable ? 'readonly-sqlite-and-held-writer-locks' : 'unavailable',
         tasksScope: 'local-desktop-root-chats',
       },
     };
-    if (usageLive) await save();
-    return result;
   }
   return {
+    refreshUsage,
+    refreshTasks,
+    snapshot,
     readStatus() {
-      if (!pending) pending = collect().finally(() => { pending = null; });
-      return pending;
+      if (!pendingStatus) pendingStatus = Promise.all([refreshUsage(), refreshTasks()])
+        .then(snapshot).finally(() => { pendingStatus = null; });
+      return pendingStatus;
     },
-    close() { server?.close(); },
+    async readTaskStatus() {
+      await refreshTasks();
+      return snapshot();
+    },
+    close() { closed = true; server?.close(); },
   };
 }
 
 let singleton;
-export function readStatus() {
-  singleton ||= createStatusReader({cacheFile: process.env.CODEX_RECHARGE_DATA_DIR
+function getReader() {
+  return singleton ||= createStatusReader({cacheFile: process.env.CODEX_RECHARGE_DATA_DIR
     ? join(process.env.CODEX_RECHARGE_DATA_DIR, 'quota-cache.json') : undefined});
-  return singleton.readStatus();
 }
+export function readStatus() { return getReader().readStatus(); }
+export function readTaskStatus() { return getReader().readTaskStatus(); }
+export function refreshUsage(options) { return getReader().refreshUsage(options); }
 export function closeTelemetry() { singleton?.close(); singleton = undefined; }
