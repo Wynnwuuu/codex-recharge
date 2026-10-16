@@ -24,8 +24,20 @@ export function RechargeCard({frame,level,title='Codex',showPercentage=true,tran
  const hue=p<30?Math.max(0,(p-20)*2):p<60?20+(p-30)*1.2:56+(p-60)*1.15;
  const phase=frame/60*Math.PI*2*0.6;
  const boundary=pillX+pillWidth*p/100;
- const wobble=Math.sin(phase)*4.5;
- const wave=`M ${pillX-26} ${pillY-19} H ${boundary} C ${boundary-13+wobble} ${pillY+pillHeight*.25} ${boundary+14+wobble} ${pillY+pillHeight*.4} ${boundary-3} ${pillY+pillHeight*.56} C ${boundary-16+wobble} ${pillY+pillHeight*.75} ${boundary+7} ${pillY+pillHeight*.9} ${boundary} ${pillY+pillHeight+16} H ${pillX-26} Z`;
+ // A travelling liquid edge: generous alternating bends, with slower breathing.
+ // At 0/100% the displacement fades so empty/full remain visually accurate.
+ const edgeFactor=Math.min(1,p/15,(100-p)/15);
+ const amplitude=(compact?25:20)*(1+.16*Math.sin(phase/3))*edgeFactor;
+ const points=Array.from({length:9},(_,i)=>({
+  x:boundary+Math.sin(phase+i/8*Math.PI*1.6)*amplitude,
+  y:pillY-20+i/8*(pillHeight+40),
+ }));
+ let wave=`M ${pillX-26} ${points[0].y} H ${points[0].x}`;
+ for(let i=1;i<points.length;i++){
+  const a=points[i-1],b=points[i],before=points[Math.max(0,i-2)],after=points[Math.min(points.length-1,i+1)];
+  wave+=` C ${a.x+(b.x-before.x)/6} ${a.y+(b.y-before.y)/6} ${b.x-(after.x-a.x)/6} ${b.y-(after.y-a.y)/6} ${b.x} ${b.y}`;
+ }
+ wave+=` H ${pillX-26} Z`;
  const hot=p>=95?'#ecff00':`hsl(${hue+12} 100% 53%)`;
  const middle=`hsl(${hue} 100% 49%)`;
  const dark=`hsl(${Math.min(120,hue+20)} 100% ${p>=60?16:42}%)`;
