@@ -1,6 +1,6 @@
 # macOS desktop host
 
-The native AppKit host displays the shared React interface in a transparent, floating 120 × 160 point `NSPanel`. It joins all Spaces and fullscreen desktops. The menu bar button opens Codex, toggles the panel, refreshes the local status, or quits. Drag the companion to reposition it; its position is saved by macOS. Saved positions from earlier versions keep the current compact window size.
+The native AppKit host displays the shared React interface in a transparent, floating 180 × 240 point `NSPanel`. It joins all Spaces and fullscreen desktops. The menu bar button opens Codex, toggles the panel, refreshes the local status, or quits. Drag the companion to reposition it; its position is saved by macOS. Saved positions from earlier versions keep the current compact window size.
 
 ```sh
 npm run build

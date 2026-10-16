@@ -34,7 +34,7 @@ final class DesktopCompanion: NSObject, NSApplicationDelegate, WKScriptMessageHa
     }
 
     private func makePanel() {
-        let size = NSSize(width: 120, height: 160)
+        let size = NSSize(width: 180, height: 240)
         panel = CompanionPanel(contentRect: NSRect(origin: .zero, size: size),
                                styleMask: [.borderless, .nonactivatingPanel],
                                backing: .buffered, defer: false)

@@ -16,9 +16,10 @@ export const demoLevel=(frame:number):number=>{
 export function RechargeCard({frame,level,title='Codex',showPercentage=true,transparent=false,compact=false}:RechargeCardProps){
  const p=level===null?0:clamp(level);
  const cardHeight=compact?330:490;
- const cardWidth=compact?560:490, cardX=(720-cardWidth)/2;
- const pillX=cardX+31, pillWidth=cardWidth-62;
- const pillY=compact?310:394, pillHeight=compact?105:178, pillRadius=pillHeight/2;
+ const cardWidth=compact?600:490, cardX=(720-cardWidth)/2;
+ const pillInset=compact?48:31;
+ const pillX=cardX+pillInset, pillWidth=cardWidth-pillInset*2;
+ const pillY=compact?300:394, pillHeight=compact?95:178, pillRadius=pillHeight/2;
  const floor=115+cardHeight;
  const hue=p<30?Math.max(0,(p-20)*2):p<60?20+(p-30)*1.2:56+(p-60)*1.15;
  const phase=frame/60*Math.PI*2*0.6;
@@ -53,7 +54,7 @@ export function RechargeCard({frame,level,title='Codex',showPercentage=true,tran
  <rect x={cardX+18} y="133" width={cardWidth-36} height={cardHeight-36} rx="110" fill={ref('body')}/>
  <g clipPath={ref('card')}><ellipse cx="360" cy={compact?355:515} rx="340" ry="210" fill={ref('pool')}/><rect x={cardX+23} y={compact?245:290} width={cardWidth-46} height={compact?210:310} fill={ref('dots')}/></g>
  <text x="360" y={compact?233:256} textAnchor="middle" fill="#fafaf9" fontFamily="Arial, Helvetica, sans-serif" fontSize="72" fontWeight="700" letterSpacing="-3.2">{title}</text>
- <g fill="#fff" opacity=".28" fontFamily="Arial, Helvetica, sans-serif" fontSize="32"><text x={pillX+41} y={compact?289:370} textAnchor="middle">0</text><text x={compact?360:341} y={compact?289:370} textAnchor="middle">50</text><text x={pillX+pillWidth-59} y={compact?289:370} textAnchor="middle">100</text></g>
+ <g fill="#fff" opacity=".28" fontFamily="Arial, Helvetica, sans-serif" fontSize="32"><text x={pillX+41} y={compact?279:370} textAnchor="middle">0</text><text x={compact?360:341} y={compact?279:370} textAnchor="middle">50</text><text x={pillX+pillWidth-59} y={compact?279:370} textAnchor="middle">100</text></g>
  <rect x={pillX} y={pillY} width={pillWidth} height={pillHeight} rx={pillRadius} fill={hot} opacity=".19" filter={ref('bloom')}/>
  <rect x={pillX} y={pillY} width={pillWidth} height={pillHeight} rx={pillRadius} fill="#272522"/>
  <g clipPath={ref('pill')}>
