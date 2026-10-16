@@ -4,6 +4,8 @@ The native AppKit host displays the shared React interface in a transparent, flo
 
 Drag the companion to reposition it. The task tooltip opens above a companion near the bottom of the screen and below one near the top, choosing the side with more available space when both fit. The host uses the companion's actual display and its usable bounds, including the Dock and menu bar. Tooltip direction changes preserve the companion's screen position, including during a drag and across displays. Only the canvas is constrained to the usable bounds; the transparent window area may extend beyond them. Position persistence stores the canvas anchor independently of tooltip direction and upgrades previous saved window positions without moving the visible companion.
 
+Tooltip visibility uses the actual native screen pointer. Entering the visible rounded card shows it immediately; leaving that card hides it, including when another application is active. The transparent canvas margins, rounded corners outside the card, and tooltip itself do not keep it open. Mouse-only local/global event monitors update the state on movement, with a 30 Hz fallback for missed WebKit exit events. This requires no keyboard monitoring, Accessibility permission, or changes to global settings. The frontend's desktop visibility rule uses the native boolean rather than WebKit's potentially stale `:hover` or focus state.
+
 ```sh
 npm run build
 node scripts/build-desktop.mjs
@@ -24,6 +26,11 @@ The native host maintains one telemetry CLI process, which refreshes every 30 se
 window.webkit.messageHandlers.codex.postMessage({action: 'openCodex'});
 window.webkit.messageHandlers.codex.postMessage({action: 'getStatus'});
 window.webkit.messageHandlers.codex.postMessage({action: 'getLayout'});
+window.webkit.messageHandlers.codex.postMessage({action: 'getHover'});
+// Visible card bounds, measured relative to the companion canvas's top-left.
+window.webkit.messageHandlers.codex.postMessage({
+  action: 'setHoverRegion', x: 15, y: 28.75, width: 150, height: 82.5, radius: 31.75,
+});
 // Report actual tooltip height after content changes; native clamps this to 40–400 points.
 window.webkit.messageHandlers.codex.postMessage({action: 'setTooltipHeight', height: 112});
 // Start this on pointerdown; the native host tracks the pointer until mouseup.
@@ -33,6 +40,8 @@ window.webkit.messageHandlers.codex.postMessage({action: 'drag', phase: 'start'}
 Listen for `window.addEventListener('codex-status', event => ...)`. `event.detail` holds the telemetry result. The last result is also available through `window.__codexInitialStatus`.
 
 The host injects `window.__codexTooltipPlacement` (`above` or `below`) and `window.__codexDesktopHeight` before the frontend loads. Listen for `codex-layout`, whose `event.detail` contains `{placement, panelHeight}`, and request the current layout with `getLayout` on mount. The frontend applies `.desktop[data-placement]` and matches the reported panel height. Native updates arrive after load, during a drag, after a display configuration change, and when the measured tooltip height changes.
+
+`window.__codexNativeHovered` holds the latest native hover boolean. Listen for `codex-hover`, whose detail is `{hovered: boolean}`; the host publishes changes and responds to `getHover` with the current pointer state. The React desktop root applies `.desktop[data-hovered]` from this value. `setHoverRegion` accepts finite numeric coordinates, intersects its rectangle with the 180 × 135 canvas, and clamps its radius to half the shortest edge. The native hit test converts this top-left rectangle through the canvas anchor into screen coordinates, independently of tooltip placement. A hidden panel always publishes false. Changing application focus alone does not hide the tooltip while the pointer is actually inside the card.
 
 The companion canvas is positioned 8 points from the window's top for `below`, or 8 points from its bottom for `above`. The native anchor is the canvas's screen-space bottom-left corner, so changing direction adjusts the window's origin while keeping that corner stationary. The frontend measures the tooltip with `ResizeObserver` and sends `setTooltipHeight`; the window height is `max(240, 135 + 8 + ceil(tooltipHeight) + 8)`.
 
@@ -57,5 +66,14 @@ To exercise native placement on every attached display, including actual DOM bou
 ```
 
 `--placement-test` places the companion near each display's top and bottom in turn, verifies the selected direction, confirms the tooltip remains inside the WebKit viewport, and checks that the companion's global DOM coordinates remain unchanged when the tooltip flips. `--test-placement` selects the final capture near the corresponding screen edge and makes the tooltip visible for the snapshot. Tests do not write saved positions; they restore the original anchor after the placement checks. Diagnostic output for these checks contains only booleans.
+
+To regress native hover hit testing and its actual WebKit/React visibility bridge on every attached display, run:
+
+```sh
+"outputs/Codex Recharge.app/Contents/MacOS/CodexRecharge" \
+  --self-test --require-live-status --placement-test --hover-test
+```
+
+`--hover-test` injects diagnostic native screen coordinates into the production hit test without moving or synthesizing the operating-system pointer. For both tooltip directions, it checks the card center and edges, all four outside edges, a rounded corner, a canvas margin, and the tooltip reserve. Each check verifies native state, the React `data-hovered` attribute, and actual tooltip opacity. It also focuses the companion to ensure keyboard focus cannot retain the tooltip after leaving. These are bridge and geometry tests; verifying real mouse movement without a click requires a separate manual or browser-control check against the running desktop window.
 
 The bundle is ad hoc signed for local use. Copying it to another Mac may require a locally built version or normal macOS approval for unsigned distribution; no developer signing certificate or notarization is included.

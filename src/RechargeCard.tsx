@@ -62,7 +62,7 @@ export function RechargeCard({frame,level,title='Codex',showPercentage=true,tran
  {!transparent&&<rect width="720" height={compact?540:720} fill="white"/>}
  <rect x={cardX+18} y={compact?320:421} width={cardWidth-36} height={compact?137:196} rx="90" fill="#161610" opacity=".31" filter={ref('shadow')}/>
  <ellipse cx="360" cy={floor-17} rx="246" ry="80" fill={ref('pool')} filter={ref('bloom')}/>
- <rect x={cardX} y="115" width={cardWidth} height={cardHeight} rx="127" fill={ref('rim')}/>
+ <rect data-card-surface="true" x={cardX} y="115" width={cardWidth} height={cardHeight} rx="127" fill={ref('rim')}/>
  <rect x={cardX+18} y="133" width={cardWidth-36} height={cardHeight-36} rx="110" fill={ref('body')}/>
  <g clipPath={ref('card')}><ellipse cx="360" cy={compact?355:515} rx="340" ry="210" fill={ref('pool')}/><rect x={cardX+23} y={compact?245:290} width={cardWidth-46} height={compact?210:310} fill={ref('dots')}/></g>
  <text x="360" y={compact?233:256} textAnchor="middle" fill="#fafaf9" fontFamily="Arial, Helvetica, sans-serif" fontSize="72" fontWeight="700" letterSpacing="-3.2">{title}</text>

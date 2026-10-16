@@ -15,6 +15,19 @@ final class DesktopCompanion: NSObject, NSApplicationDelegate, WKScriptMessageHa
     private var statusItem: NSStatusItem!
     private var statusTimer: Timer?
     private var dragTimer: Timer?
+    private var hoverTimer: Timer?
+    private var localMouseMonitor: Any?
+    private var globalMouseMonitor: Any?
+    private var nativeHovered = false
+    // The visible rounded card, in top-left canvas coordinates; transparent
+    // canvas margins and the tooltip reserve must never count as a hover.
+    private struct HoverRegion {
+        var rect = NSRect(x: 15, y: 28.75, width: 150, height: 82.5)
+        var radius: CGFloat = 31.75
+    }
+    private var hoverRegion = HoverRegion()
+    private var diagnosticHoverPoint: NSPoint?
+    private var hoverChecks: [String: Bool] = [:]
     private var dragMouseOrigin = NSPoint.zero
     private var dragAnchorOrigin = NSPoint.zero
     // This point identifies the companion canvas, independent of tooltip direction.
@@ -36,11 +49,12 @@ final class DesktopCompanion: NSObject, NSApplicationDelegate, WKScriptMessageHa
     private let worker = DispatchQueue(label: "cc.motionface.codex-recharge.telemetry", qos: .utility)
     private let arguments = CommandLine.arguments
     private var selfTest: Bool { arguments.contains("--self-test") }
-    private var diagnosticRun: Bool { selfTest || arguments.contains("--placement-test") || argumentValue("--test-placement") != nil }
+    private var diagnosticRun: Bool { selfTest || arguments.contains("--placement-test") || arguments.contains("--hover-test") || argumentValue("--test-placement") != nil }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         makePanel()
+        startHoverTracking()
         makeMenu()
         loadFrontend()
         statusTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
@@ -80,7 +94,7 @@ final class DesktopCompanion: NSObject, NSApplicationDelegate, WKScriptMessageHa
         let contentController = WKUserContentController()
         contentController.add(self, name: "codex")
         contentController.addUserScript(WKUserScript(source:
-            "Object.defineProperty(window, 'codexDesktop', {value: true}); window.__codexTooltipPlacement = '\(tooltipPlacement.rawValue)'; window.__codexDesktopHeight = \(Int(panelHeight)); window.__codexHostErrorCount = 0; window.addEventListener('error', () => window.__codexHostErrorCount++); window.addEventListener('unhandledrejection', () => window.__codexHostErrorCount++);",
+            "Object.defineProperty(window, 'codexDesktop', {value: true}); window.__codexNativeHovered = false; window.__codexTooltipPlacement = '\(tooltipPlacement.rawValue)'; window.__codexDesktopHeight = \(Int(panelHeight)); window.__codexHostErrorCount = 0; window.addEventListener('error', () => window.__codexHostErrorCount++); window.addEventListener('unhandledrejection', () => window.__codexHostErrorCount++);",
             injectionTime: .atDocumentStart, forMainFrameOnly: true))
         let configuration = WKWebViewConfiguration()
         configuration.userContentController = contentController
@@ -129,6 +143,7 @@ final class DesktopCompanion: NSObject, NSApplicationDelegate, WKScriptMessageHa
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         publishLayout()
+        refreshHover(forcePublish: true)
         if let status = cachedStatus { publish(status) }
         refreshStatus()
         if selfTest || argumentValue("--screenshot") != nil {
@@ -153,6 +168,12 @@ final class DesktopCompanion: NSObject, NSApplicationDelegate, WKScriptMessageHa
         switch action {
         case "openCodex": openCodex()
         case "getLayout": updateLayout()
+        case "getHover": refreshHover(forcePublish: true)
+        case "setHoverRegion":
+            if let region = validatedHoverRegion(body) {
+                hoverRegion = region
+                refreshHover()
+            }
         case "setTooltipHeight":
             if let value = body["height"] as? NSNumber, value.doubleValue.isFinite {
                 let tooltipHeight = min(max(CGFloat(value.doubleValue), 40), 400)
@@ -167,6 +188,75 @@ final class DesktopCompanion: NSObject, NSApplicationDelegate, WKScriptMessageHa
             else { startDragging() }
         default: break
         }
+    }
+
+    private func validatedHoverRegion(_ body: [String: Any]) -> HoverRegion? {
+        let keys = ["x", "y", "width", "height", "radius"]
+        let numbers = keys.compactMap { body[$0] as? NSNumber }
+        guard numbers.count == keys.count, numbers.allSatisfy({ $0.doubleValue.isFinite }) else { return nil }
+        let values = numbers.map { CGFloat($0.doubleValue) }
+        guard values[2] > 0, values[3] > 0, values[4] >= 0 else { return nil }
+        let requested = NSRect(x: values[0], y: values[1], width: values[2], height: values[3])
+        let canvas = NSRect(origin: .zero, size: companionSize)
+        let rect = requested.intersection(canvas)
+        guard !rect.isNull, rect.width > 0, rect.height > 0 else { return nil }
+        return HoverRegion(rect: rect, radius: min(values[4], min(rect.width, rect.height) / 2))
+    }
+
+    private var hoverScreenRect: NSRect {
+        let rect = hoverRegion.rect
+        return NSRect(x: companionAnchor.x + rect.minX,
+                      y: companionAnchor.y + companionSize.height - rect.maxY,
+                      width: rect.width, height: rect.height)
+    }
+
+    private func pointerInsideCard(_ point: NSPoint) -> Bool {
+        let rect = hoverScreenRect
+        guard rect.contains(point) else { return false }
+        let radius = hoverRegion.radius
+        guard radius > 0 else { return true }
+        // Clamp to the inner rounded-rectangle core, then test its corner circle.
+        let nearestX = min(max(point.x, rect.minX + radius), rect.maxX - radius)
+        let nearestY = min(max(point.y, rect.minY + radius), rect.maxY - radius)
+        let dx = point.x - nearestX, dy = point.y - nearestY
+        return dx * dx + dy * dy <= radius * radius
+    }
+
+    private func startHoverTracking() {
+        let mouseEvents: NSEvent.EventTypeMask = [.mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged]
+        localMouseMonitor = NSEvent.addLocalMonitorForEvents(matching: mouseEvents) { [weak self] event in
+            self?.refreshHover()
+            return event
+        }
+        // Mouse-only monitoring does not request keyboard events or Accessibility
+        // access. This receives movement when another application is frontmost.
+        globalMouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: mouseEvents) { [weak self] _ in
+            self?.refreshHover()
+        }
+        let timer = Timer(timeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in self?.refreshHover() }
+        hoverTimer = timer
+        // WebKit can retain :hover in a nonactivating transparent window. Polling
+        // the actual screen pointer also covers missed native mouse-exit events.
+        RunLoop.main.add(timer, forMode: .common)
+        refreshHover(forcePublish: true)
+    }
+
+    private func stopHoverTracking() {
+        hoverTimer?.invalidate()
+        hoverTimer = nil
+        if let monitor = localMouseMonitor { NSEvent.removeMonitor(monitor) }
+        if let monitor = globalMouseMonitor { NSEvent.removeMonitor(monitor) }
+        localMouseMonitor = nil
+        globalMouseMonitor = nil
+    }
+
+    private func refreshHover(forcePublish: Bool = false) {
+        guard !isTerminating else { return }
+        let point = diagnosticHoverPoint ?? NSEvent.mouseLocation
+        let hovered = panel?.isVisible == true && pointerInsideCard(point)
+        guard forcePublish || hovered != nativeHovered else { return }
+        nativeHovered = hovered
+        webView?.evaluateJavaScript("window.__codexNativeHovered = \(hovered); window.dispatchEvent(new CustomEvent('codex-hover', {detail: {hovered: window.__codexNativeHovered}}));", completionHandler: nil)
     }
 
     private func startDragging() {
@@ -229,6 +319,7 @@ final class DesktopCompanion: NSObject, NSApplicationDelegate, WKScriptMessageHa
         else { tooltipPlacement = above >= below ? .above : .below }
         applyPanelFrame()
         if shouldPublish { publishLayout() }
+        refreshHover()
     }
 
     private func applyPanelFrame() {
@@ -339,6 +430,7 @@ final class DesktopCompanion: NSObject, NSApplicationDelegate, WKScriptMessageHa
     @objc private func togglePanel() {
         if panel.isVisible { panel.orderOut(nil) }
         else { panel.orderFrontRegardless() }
+        refreshHover()
     }
     @objc private func refreshFromMenu() {
         if telemetryProcess?.isRunning == true {
@@ -351,6 +443,7 @@ final class DesktopCompanion: NSObject, NSApplicationDelegate, WKScriptMessageHa
     func applicationWillTerminate(_ notification: Notification) {
         isTerminating = true
         statusTimer?.invalidate()
+        stopHoverTracking()
         stopDragging()
         for observer in screenObservers { NotificationCenter.default.removeObserver(observer) }
         if telemetryProcess?.isRunning == true { telemetryProcess?.terminate() }
@@ -378,9 +471,91 @@ final class DesktopCompanion: NSObject, NSApplicationDelegate, WKScriptMessageHa
                 guard let self = self else { return }
                 self.companionAnchor = originalAnchor
                 self.updateLayout()
+                self.prepareHoverTests()
+            }
+        } else { prepareHoverTests() }
+    }
+
+    private func prepareHoverTests() {
+        guard arguments.contains("--hover-test") else { configureCapturePlacement(); return }
+        let screens = NSScreen.screens
+        guard !screens.isEmpty else { finishSelfTest(1); return }
+        let originalAnchor = companionAnchor
+        // Placement snapshots deliberately reveal the tooltip with inline style.
+        // Remove that override before testing the production visibility rules.
+        webView.evaluateJavaScript("document.querySelector('.tooltip')?.style.removeProperty('opacity'); document.querySelector('.tooltip')?.style.removeProperty('transform'); document.querySelector('.pet')?.focus();") { [weak self] _, _ in
+            self?.runHoverTests(screens: screens, index: 0) { [weak self] in
+                guard let self = self else { return }
+                self.diagnosticHoverPoint = nil
+                self.companionAnchor = originalAnchor
+                self.updateLayout()
+                self.refreshHover(forcePublish: true)
                 self.configureCapturePlacement()
             }
-        } else { configureCapturePlacement() }
+        }
+    }
+
+    private func runHoverTests(screens: [NSScreen], index: Int, completion: @escaping () -> Void) {
+        guard index < screens.count * 2 else { completion(); return }
+        let visible = screens[index / 2].visibleFrame
+        let expected: TooltipPlacement = index % 2 == 0 ? .above : .below
+        companionAnchor = NSPoint(x: visible.midX - companionSize.width / 2,
+            y: expected == .above ? visible.minY + 12 : visible.maxY - companionSize.height - 12)
+        updateLayout()
+        let rect = hoverScreenRect
+        let prefix = "screen\(index / 2 + 1)_\(expected.rawValue)"
+        hoverChecks[prefix + "_placement"] = tooltipPlacement == expected
+        let samples: [(String, NSPoint, Bool)] = [
+            ("center", NSPoint(x: rect.midX, y: rect.midY), true),
+            ("outsideLeft", NSPoint(x: rect.minX - 0.25, y: rect.midY), false),
+            ("leftEdge", NSPoint(x: rect.minX + 0.25, y: rect.midY), true),
+            ("outsideRight", NSPoint(x: rect.maxX + 0.25, y: rect.midY), false),
+            ("rightEdge", NSPoint(x: rect.maxX - 0.25, y: rect.midY), true),
+            ("outsideTop", NSPoint(x: rect.midX, y: rect.maxY + 0.25), false),
+            ("topEdge", NSPoint(x: rect.midX, y: rect.maxY - 0.25), true),
+            ("outsideBottom", NSPoint(x: rect.midX, y: rect.minY - 0.25), false),
+            ("bottomEdge", NSPoint(x: rect.midX, y: rect.minY + 0.25), true),
+            ("roundedCorner", NSPoint(x: rect.minX + 0.25, y: rect.minY + 0.25), false),
+            ("canvasMargin", NSPoint(x: companionAnchor.x + 1, y: companionAnchor.y + companionSize.height / 2), false),
+            ("tooltipReserve", NSPoint(x: companionAnchor.x + companionSize.width / 2,
+                y: expected == .above ? companionAnchor.y + companionSize.height + 12 : companionAnchor.y - 12), false)
+        ]
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+            self?.runHoverSamples(samples, index: 0, prefix: prefix) { [weak self] in
+                self?.runHoverTests(screens: screens, index: index + 1, completion: completion)
+            }
+        }
+    }
+
+    private func runHoverSamples(_ samples: [(String, NSPoint, Bool)], index: Int,
+                                 prefix: String, completion: @escaping () -> Void) {
+        guard index < samples.count else { completion(); return }
+        let sample = samples[index]
+        // Diagnostic coordinates exercise the real native hit test and bridge;
+        // they never warp or synthesize the user's operating-system pointer.
+        diagnosticHoverPoint = sample.1
+        refreshHover()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            guard let self = self else { return }
+            let script = """
+            (() => {
+              const tooltip = document.querySelector('.tooltip');
+              return {hovered: window.__codexNativeHovered,
+                dataHovered: document.querySelector('.desktop')?.dataset.hovered,
+                opacity: tooltip ? Number(getComputedStyle(tooltip).opacity) : -1};
+            })()
+            """
+            self.webView.evaluateJavaScript(script) { value, error in
+                let result = value as? [String: Any] ?? [:]
+                let opacity = (result["opacity"] as? NSNumber)?.doubleValue ?? -1
+                let matchesDOM = sample.2 ? opacity == 1 : opacity == 0
+                self.hoverChecks[prefix + "_" + sample.0] = error == nil && matchesDOM
+                    && result["hovered"] as? Bool == sample.2
+                    && result["dataHovered"] as? String == String(sample.2)
+                    && self.nativeHovered == sample.2
+                self.runHoverSamples(samples, index: index + 1, prefix: prefix, completion: completion)
+            }
+        }
     }
 
     private func configureCapturePlacement() {
@@ -497,6 +672,15 @@ final class DesktopCompanion: NSObject, NSApplicationDelegate, WKScriptMessageHa
                     return
                 }
             }
+            if !self.hoverChecks.isEmpty {
+                if let data = try? JSONSerialization.data(withJSONObject: self.hoverChecks, options: [.sortedKeys]),
+                   let diagnostics = String(data: data, encoding: .utf8) { print("Desktop hover diagnostics (injected native coordinates, no OS pointer movement): \(diagnostics)") }
+                if self.hoverChecks.values.contains(false) {
+                    fputs("Desktop native hover/DOM self-test failed.\n", stderr)
+                    self.finishSelfTest(1)
+                    return
+                }
+            }
             if let error = error as NSError? { print("Desktop JavaScript error: \(error.domain) \(error.code)") }
             guard error == nil, let result = value as? [String: Any], result["desktop"] as? Bool == true,
                   result["loaded"] as? Bool == true, result["rendered"] as? Bool == true,
@@ -541,6 +725,7 @@ final class DesktopCompanion: NSObject, NSApplicationDelegate, WKScriptMessageHa
     private func finishSelfTest(_ code: Int32) {
         isTerminating = true
         statusTimer?.invalidate()
+        stopHoverTracking()
         stopDragging()
         if telemetryProcess?.isRunning == true { telemetryProcess?.terminate() }
         awaitTelemetryExit(code: code, deadline: Date().addingTimeInterval(3))
