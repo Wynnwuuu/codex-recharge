@@ -27,7 +27,7 @@ function App(){
  {!desktop&&<header><span className="brand-mark">◈</span><span>CODEX RECHARGE</span><span className="local-badge">本机运行</span></header>}
  <section className="companion" data-usage-status={status.usageStatus}>
  <button className="pet" aria-label={`打开 Codex，${usage}，${tasks}`} onPointerDown={e=>{down.current={x:e.screenX,y:e.screenY};if(desktop)bridge('drag',{phase:'start'});}} onPointerUp={e=>{if(desktop)bridge('drag',{phase:'end'});const d=down.current;down.current=null;if(d&&Math.hypot(e.screenX-d.x,e.screenY-d.y)<5){openCodex();}}} onKeyDown={e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();openCodex();}}}>
- <Player component={RechargeComposition} compositionWidth={720} compositionHeight={720} durationInFrames={900} fps={60} autoPlay loop controls={false} clickToPlay={false} doubleClickToFullscreen={false} spaceKeyToPlayOrPause={false} inputProps={{mode:demo?'reference':'usage',remainingPercent:status.remainingPercent,transparent:desktop}} style={{width:'100%',height:'100%',pointerEvents:'none'}}/>
+ <Player component={RechargeComposition} compositionWidth={720} compositionHeight={540} durationInFrames={900} fps={60} autoPlay loop controls={false} clickToPlay={false} doubleClickToFullscreen={false} spaceKeyToPlayOrPause={false} inputProps={{mode:demo?'reference':'usage',remainingPercent:status.remainingPercent,transparent:desktop,compact:true}} style={{width:'100%',height:'100%',pointerEvents:'none'}}/>
  </button>
  <div className="tooltip" role="status"><div className="tooltip-title"><i className={status.activeTasks?'busy':'idle'}/>{tasks}</div><div>{usage}</div>{status.windows?.map((w,i)=><small key={i}>{w.label} · {Math.round(w.remainingPercent)}% 剩余</small>)}<small>点击打开 Codex · 拖动调整位置</small></div>
  </section>

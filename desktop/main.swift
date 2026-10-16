@@ -34,7 +34,7 @@ final class DesktopCompanion: NSObject, NSApplicationDelegate, WKScriptMessageHa
     }
 
     private func makePanel() {
-        let size = NSSize(width: 300, height: 420)
+        let size = NSSize(width: 120, height: 160)
         panel = CompanionPanel(contentRect: NSRect(origin: .zero, size: size),
                                styleMask: [.borderless, .nonactivatingPanel],
                                backing: .buffered, defer: false)
@@ -65,7 +65,10 @@ final class DesktopCompanion: NSObject, NSApplicationDelegate, WKScriptMessageHa
         webView.layer?.backgroundColor = NSColor.clear.cgColor
         panel.contentView = webView
 
-        if !panel.setFrameUsingName("CodexRechargePanel") {
+        if panel.setFrameUsingName("CodexRechargePanel") {
+            // An earlier version used a larger panel. Restore the saved position only.
+            panel.setFrame(NSRect(origin: panel.frame.origin, size: size), display: false)
+        } else {
             let visible = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1200, height: 800)
             panel.setFrameOrigin(NSPoint(x: visible.maxX - size.width - 24, y: visible.minY + 24))
         }
@@ -310,12 +313,12 @@ final class DesktopCompanion: NSObject, NSApplicationDelegate, WKScriptMessageHa
                 return
             }
             guard let path = self.argumentValue("--screenshot") else {
-                print("Desktop bridge, React view, and status delivery self-test passed (300 x 420).")
+                print("Desktop bridge, React view, and status delivery self-test passed (\(Int(self.webView.bounds.width)) x \(Int(self.webView.bounds.height))).")
                 if self.selfTest { self.finishSelfTest(0) }
                 return
             }
             let configuration = WKSnapshotConfiguration()
-            configuration.snapshotWidth = NSNumber(value: 600)
+            configuration.snapshotWidth = NSNumber(value: Double(self.webView.bounds.width))
             self.webView.takeSnapshot(with: configuration) { image, snapshotError in
                 guard snapshotError == nil, let data = image?.tiffRepresentation,
                       let bitmap = NSBitmapImageRep(data: data), let png = bitmap.representation(using: .png, properties: [:]) else {

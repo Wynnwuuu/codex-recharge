@@ -1,6 +1,6 @@
 # Codex Recharge
 
-用 Remotion 重建发光电量卡片，并把它做成 macOS 桌面悬浮组件：标题改为 **Codex**，百分比显示当前账号的 Codex 剩余用量；点击打开 Codex，悬停查看本机正在运行的任务数，拖动调整位置。
+用 Remotion 重建发光电量卡片，并把它做成 macOS 桌面悬浮组件：标题改为 **Codex**，百分比显示当前账号的 Codex 剩余用量；点击打开 Codex，悬停查看本机正在运行的任务数，拖动调整位置。桌面版采用横向长方形，在缩至初版三分之一的基础上再放大 20%，横向加长并保留原有圆角风格。
 
 参考：[Motionface · Primium Recharge Overlay](https://motionface.cc/?recording=610805bb-4a78-484b-b37c-916aa34bbee6)。构图、关键帧和复刻取舍见 [参考分析](docs/REFERENCE.md)。源码使用 SVG、React 和 Remotion 绘制，不依赖参考视频文件。
 
@@ -13,6 +13,7 @@ npm ci
 npm run dev                # 浏览器预览，悬停可查看状态
 npm run studio             # Remotion 时间线
 npm run render             # 15 秒参考节奏动画
+npm run render -- --compact # 导出横向版本
 npm run render -- --live    # 以渲染开始时的实际剩余用量生成视频
 npm run desktop:build      # 构建本机桌面应用
 open "outputs/Codex Recharge.app"
