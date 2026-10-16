@@ -5,6 +5,8 @@ import WebKit
 final class CompanionPanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
+    // The transparent tooltip reserve can cross an edge; only the companion canvas is clamped.
+    override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect { frameRect }
 }
 
 final class DesktopCompanion: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavigationDelegate {
@@ -14,7 +16,19 @@ final class DesktopCompanion: NSObject, NSApplicationDelegate, WKScriptMessageHa
     private var statusTimer: Timer?
     private var dragTimer: Timer?
     private var dragMouseOrigin = NSPoint.zero
-    private var dragWindowOrigin = NSPoint.zero
+    private var dragAnchorOrigin = NSPoint.zero
+    // This point identifies the companion canvas, independent of tooltip direction.
+    private var companionAnchor = NSPoint.zero
+    private enum TooltipPlacement: String { case above, below }
+    private var tooltipPlacement: TooltipPlacement = .below
+    private let companionSize = NSSize(width: 180, height: 135)
+    private var panelHeight: CGFloat = 240
+    private var tooltipSpace: CGFloat { panelHeight - companionSize.height - 8 }
+    private var isApplyingLayout = false
+    private var screenObservers: [NSObjectProtocol] = []
+    private let anchorXKey = "CodexRechargeAnchorX"
+    private let anchorYKey = "CodexRechargeAnchorY"
+    private var placementChecks: [String: Bool] = [:]
     private var cachedStatus: [String: Any]?
     private var statusInFlight = false
     private var isTerminating = false
@@ -22,6 +36,7 @@ final class DesktopCompanion: NSObject, NSApplicationDelegate, WKScriptMessageHa
     private let worker = DispatchQueue(label: "cc.motionface.codex-recharge.telemetry", qos: .utility)
     private let arguments = CommandLine.arguments
     private var selfTest: Bool { arguments.contains("--self-test") }
+    private var diagnosticRun: Bool { selfTest || arguments.contains("--placement-test") || argumentValue("--test-placement") != nil }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -49,10 +64,23 @@ final class DesktopCompanion: NSObject, NSApplicationDelegate, WKScriptMessageHa
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         panel.isReleasedWhenClosed = false
 
+        let defaults = UserDefaults.standard
+        if defaults.object(forKey: anchorXKey) != nil && defaults.object(forKey: anchorYKey) != nil {
+            companionAnchor = NSPoint(x: defaults.double(forKey: anchorXKey), y: defaults.double(forKey: anchorYKey))
+        } else if panel.setFrameUsingName("CodexRechargePanel") {
+            // Upgrade the old top-aligned canvas without moving the companion itself.
+            companionAnchor = NSPoint(x: panel.frame.minX, y: panel.frame.minY + 97)
+        } else {
+            let visible = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1200, height: 800)
+            companionAnchor = NSPoint(x: visible.maxX - size.width - 24, y: visible.minY + 24)
+        }
+        panel.setContentSize(size)
+        updateLayout(publish: false)
+
         let contentController = WKUserContentController()
         contentController.add(self, name: "codex")
         contentController.addUserScript(WKUserScript(source:
-            "Object.defineProperty(window, 'codexDesktop', {value: true}); window.__codexHostErrorCount = 0; window.addEventListener('error', () => window.__codexHostErrorCount++); window.addEventListener('unhandledrejection', () => window.__codexHostErrorCount++);",
+            "Object.defineProperty(window, 'codexDesktop', {value: true}); window.__codexTooltipPlacement = '\(tooltipPlacement.rawValue)'; window.__codexDesktopHeight = \(Int(panelHeight)); window.__codexHostErrorCount = 0; window.addEventListener('error', () => window.__codexHostErrorCount++); window.addEventListener('unhandledrejection', () => window.__codexHostErrorCount++);",
             injectionTime: .atDocumentStart, forMainFrameOnly: true))
         let configuration = WKWebViewConfiguration()
         configuration.userContentController = contentController
@@ -65,14 +93,14 @@ final class DesktopCompanion: NSObject, NSApplicationDelegate, WKScriptMessageHa
         webView.layer?.backgroundColor = NSColor.clear.cgColor
         panel.contentView = webView
 
-        if panel.setFrameUsingName("CodexRechargePanel") {
-            // An earlier version used a larger panel. Restore the saved position only.
-            panel.setFrame(NSRect(origin: panel.frame.origin, size: size), display: false)
-        } else {
-            let visible = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1200, height: 800)
-            panel.setFrameOrigin(NSPoint(x: visible.maxX - size.width - 24, y: visible.minY + 24))
-        }
-        panel.setFrameAutosaveName("CodexRechargePanel")
+        let center = NotificationCenter.default
+        screenObservers.append(center.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil, queue: .main) { [weak self] _ in self?.updateLayout() })
+        screenObservers.append(center.addObserver(forName: NSWindow.didChangeScreenNotification,
+            object: panel, queue: .main) { [weak self] _ in
+                guard let self = self, !self.isApplyingLayout else { return }
+                self.updateLayout()
+            })
         panel.orderFrontRegardless()
     }
 
@@ -100,6 +128,7 @@ final class DesktopCompanion: NSObject, NSApplicationDelegate, WKScriptMessageHa
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        publishLayout()
         if let status = cachedStatus { publish(status) }
         refreshStatus()
         if selfTest || argumentValue("--screenshot") != nil {
@@ -123,6 +152,13 @@ final class DesktopCompanion: NSObject, NSApplicationDelegate, WKScriptMessageHa
               let body = message.body as? [String: Any], let action = body["action"] as? String else { return }
         switch action {
         case "openCodex": openCodex()
+        case "getLayout": updateLayout()
+        case "setTooltipHeight":
+            if let value = body["height"] as? NSNumber, value.doubleValue.isFinite {
+                let tooltipHeight = min(max(CGFloat(value.doubleValue), 40), 400)
+                let height = max(240, companionSize.height + 8 + ceil(tooltipHeight) + 8)
+                if height != panelHeight { panelHeight = height; updateLayout() }
+            }
         case "getStatus":
             if let status = cachedStatus { publish(status) }
             refreshStatus()
@@ -136,13 +172,14 @@ final class DesktopCompanion: NSObject, NSApplicationDelegate, WKScriptMessageHa
     private func startDragging() {
         guard dragTimer == nil, NSEvent.pressedMouseButtons & 1 != 0 else { return }
         dragMouseOrigin = NSEvent.mouseLocation
-        dragWindowOrigin = panel.frame.origin
+        dragAnchorOrigin = companionAnchor
         dragTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
             guard let self = self else { return }
             guard NSEvent.pressedMouseButtons & 1 != 0 else { self.stopDragging(); return }
             let pointer = NSEvent.mouseLocation
-            self.panel.setFrameOrigin(NSPoint(x: self.dragWindowOrigin.x + pointer.x - self.dragMouseOrigin.x,
-                                             y: self.dragWindowOrigin.y + pointer.y - self.dragMouseOrigin.y))
+            self.companionAnchor = NSPoint(x: self.dragAnchorOrigin.x + pointer.x - self.dragMouseOrigin.x,
+                                           y: self.dragAnchorOrigin.y + pointer.y - self.dragMouseOrigin.y)
+            self.updateLayout()
         }
         RunLoop.main.add(dragTimer!, forMode: .eventTracking)
     }
@@ -150,7 +187,59 @@ final class DesktopCompanion: NSObject, NSApplicationDelegate, WKScriptMessageHa
     private func stopDragging() {
         dragTimer?.invalidate()
         dragTimer = nil
-        panel.saveFrame(usingName: "CodexRechargePanel")
+        persistAnchor()
+    }
+
+    private func persistAnchor() {
+        guard !diagnosticRun else { return }
+        UserDefaults.standard.set(Double(companionAnchor.x), forKey: anchorXKey)
+        UserDefaults.standard.set(Double(companionAnchor.y), forKey: anchorYKey)
+    }
+
+    private func screenForCompanion() -> NSScreen? {
+        let center = NSPoint(x: companionAnchor.x + companionSize.width / 2,
+                             y: companionAnchor.y + companionSize.height / 2)
+        if let screen = NSScreen.screens.first(where: { $0.frame.contains(center) }) { return screen }
+        // A disconnected display or a gap between displays should resolve to the nearest screen.
+        return NSScreen.screens.min { lhs, rhs in
+            func distance(_ screen: NSScreen) -> CGFloat {
+                let rect = screen.visibleFrame
+                let dx = max(rect.minX - center.x, 0, center.x - rect.maxX)
+                let dy = max(rect.minY - center.y, 0, center.y - rect.maxY)
+                return dx * dx + dy * dy
+            }
+            return distance(lhs) < distance(rhs)
+        }
+    }
+
+    private var canvasOffset: CGFloat { tooltipPlacement == .above ? 8 : tooltipSpace }
+
+    private func updateLayout(publish shouldPublish: Bool = true) {
+        guard !isApplyingLayout, let screen = screenForCompanion() else { return }
+        isApplyingLayout = true
+        defer { isApplyingLayout = false }
+        let visible = screen.visibleFrame
+        companionAnchor.x = min(max(companionAnchor.x, visible.minX), max(visible.minX, visible.maxX - companionSize.width))
+        companionAnchor.y = min(max(companionAnchor.y, visible.minY), max(visible.minY, visible.maxY - companionSize.height))
+        let below = companionAnchor.y - visible.minY
+        let above = visible.maxY - companionAnchor.y - companionSize.height
+        // Prefer the side with room; this also follows the screen half when both sides fit.
+        if below < tooltipSpace && above >= tooltipSpace { tooltipPlacement = .above }
+        else if above < tooltipSpace && below >= tooltipSpace { tooltipPlacement = .below }
+        else { tooltipPlacement = above >= below ? .above : .below }
+        applyPanelFrame()
+        if shouldPublish { publishLayout() }
+    }
+
+    private func applyPanelFrame() {
+        let frame = NSRect(x: companionAnchor.x, y: companionAnchor.y - canvasOffset,
+                           width: companionSize.width, height: panelHeight)
+        if panel.frame != frame { panel.setFrame(frame, display: false) }
+    }
+
+    private func publishLayout() {
+        let script = "window.__codexTooltipPlacement = '\(tooltipPlacement.rawValue)'; window.__codexDesktopHeight = \(Int(panelHeight)); window.dispatchEvent(new CustomEvent('codex-layout', {detail: {placement: window.__codexTooltipPlacement, panelHeight: window.__codexDesktopHeight}}));"
+        webView?.evaluateJavaScript(script, completionHandler: nil)
     }
 
     private func discoverNode() -> URL? {
@@ -263,6 +352,7 @@ final class DesktopCompanion: NSObject, NSApplicationDelegate, WKScriptMessageHa
         isTerminating = true
         statusTimer?.invalidate()
         stopDragging()
+        for observer in screenObservers { NotificationCenter.default.removeObserver(observer) }
         if telemetryProcess?.isRunning == true { telemetryProcess?.terminate() }
     }
 
@@ -273,9 +363,106 @@ final class DesktopCompanion: NSObject, NSApplicationDelegate, WKScriptMessageHa
 
     private func awaitStatusForCapture(deadline: Date) {
         if cachedStatus != nil || Date() >= deadline {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in self?.captureAndTest() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in self?.prepareCaptureAndTest() }
         } else {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in self?.awaitStatusForCapture(deadline: deadline) }
+        }
+    }
+
+    private func prepareCaptureAndTest() {
+        if arguments.contains("--placement-test") {
+            let screens = NSScreen.screens
+            guard !screens.isEmpty else { finishSelfTest(1); return }
+            let originalAnchor = companionAnchor
+            runPlacementTests(screens: screens, index: 0) { [weak self] in
+                guard let self = self else { return }
+                self.companionAnchor = originalAnchor
+                self.updateLayout()
+                self.configureCapturePlacement()
+            }
+        } else { configureCapturePlacement() }
+    }
+
+    private func configureCapturePlacement() {
+        if let requested = argumentValue("--test-placement"), let screen = screenForCompanion() {
+            let visible = screen.visibleFrame
+            companionAnchor.x = visible.maxX - companionSize.width - 24
+            companionAnchor.y = requested == "above" ? visible.minY + 12 : visible.maxY - companionSize.height - 12
+            updateLayout()
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in self?.captureAndTest() }
+    }
+
+    private func probeLayout(completion: @escaping ([String: Any]) -> Void) {
+        let script = """
+        (() => {
+          const companion = document.querySelector('.companion');
+          const tooltip = document.querySelector('.tooltip');
+          if (!companion || !tooltip) return {rendered: false};
+          tooltip.style.opacity = '1'; tooltip.style.transform = 'translate(-50%, 0)';
+          const c = companion.getBoundingClientRect(), t = tooltip.getBoundingClientRect();
+          const placement = window.__codexTooltipPlacement;
+          return {rendered: true, left: c.left, bottom: c.bottom,
+            tooltipLeft: t.left, tooltipTop: t.top, tooltipRight: t.right, tooltipBottom: t.bottom,
+            viewportMatches: innerHeight === window.__codexDesktopHeight,
+            bridgeMatches: document.querySelector('.desktop')?.dataset.placement === placement,
+            tooltipInside: t.left >= -0.5 && t.right <= innerWidth + 0.5 && t.top >= -0.5 && t.bottom <= innerHeight + 0.5,
+            correctSide: placement === 'above' ? t.bottom <= c.top + c.height / 2 : t.top >= c.top + c.height / 2};
+        })()
+        """
+        webView.evaluateJavaScript(script) { value, error in
+            completion(error == nil ? (value as? [String: Any] ?? [:]) : [:])
+        }
+    }
+
+    private func canvasScreenOrigin(_ probe: [String: Any]) -> NSPoint? {
+        guard let left = probe["left"] as? NSNumber, let bottom = probe["bottom"] as? NSNumber else { return nil }
+        return NSPoint(x: panel.frame.minX + CGFloat(left.doubleValue),
+                       y: panel.frame.maxY - CGFloat(bottom.doubleValue))
+    }
+
+    private func runPlacementTests(screens: [NSScreen], index: Int, completion: @escaping () -> Void) {
+        guard index < screens.count * 2 else { completion(); return }
+        let screen = screens[index / 2]
+        let visible = screen.visibleFrame
+        let expected: TooltipPlacement = index % 2 == 0 ? .above : .below
+        companionAnchor = NSPoint(x: visible.midX - companionSize.width / 2,
+            y: expected == .above ? visible.minY + 12 : visible.maxY - companionSize.height - 12)
+        // Start on the opposite side at this exact anchor, then let the screen logic flip it.
+        tooltipPlacement = expected == .above ? .below : .above
+        applyPanelFrame()
+        publishLayout()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            guard let self = self else { return }
+            self.probeLayout { before in
+                let beforeOrigin = self.canvasScreenOrigin(before)
+                self.updateLayout()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                    self.probeLayout { after in
+                        let afterOrigin = self.canvasScreenOrigin(after)
+                        let stable: Bool
+                        if let beforeOrigin = beforeOrigin, let afterOrigin = afterOrigin {
+                            stable = abs(beforeOrigin.x - afterOrigin.x) < 0.5 && abs(beforeOrigin.y - afterOrigin.y) < 0.5
+                                && abs(afterOrigin.x - self.companionAnchor.x) < 0.5 && abs(afterOrigin.y - self.companionAnchor.y) < 0.5
+                        } else { stable = false }
+                        let prefix = "screen\(index / 2 + 1)_\(expected.rawValue)"
+                        self.placementChecks[prefix + "_placement"] = self.tooltipPlacement == expected
+                        self.placementChecks[prefix + "_anchorStable"] = stable
+                        self.placementChecks[prefix + "_tooltipInside"] = after["tooltipInside"] as? Bool == true
+                        if let left = after["tooltipLeft"] as? NSNumber, let top = after["tooltipTop"] as? NSNumber,
+                           let right = after["tooltipRight"] as? NSNumber, let bottom = after["tooltipBottom"] as? NSNumber {
+                            let tooltipRect = NSRect(x: self.panel.frame.minX + CGFloat(left.doubleValue),
+                                y: self.panel.frame.maxY - CGFloat(bottom.doubleValue),
+                                width: CGFloat(right.doubleValue - left.doubleValue),
+                                height: CGFloat(bottom.doubleValue - top.doubleValue))
+                            self.placementChecks[prefix + "_screenVisible"] = visible.insetBy(dx: -0.5, dy: -0.5).contains(tooltipRect)
+                        } else { self.placementChecks[prefix + "_screenVisible"] = false }
+                        self.placementChecks[prefix + "_correctSide"] = after["correctSide"] as? Bool == true
+                        self.placementChecks[prefix + "_bridge"] = after["bridgeMatches"] as? Bool == true && after["viewportMatches"] as? Bool == true
+                        self.runPlacementTests(screens: screens, index: index + 1, completion: completion)
+                    }
+                }
+            }
         }
     }
 
@@ -285,6 +472,10 @@ final class DesktopCompanion: NSObject, NSApplicationDelegate, WKScriptMessageHa
           const status = window.__codexInitialStatus;
           const pet = document.querySelector('.pet');
           const label = pet?.getAttribute('aria-label') || '';
+          const tooltip = document.querySelector('.tooltip');
+          if (tooltip && (\(arguments.contains("--placement-test")) || \(argumentValue("--test-placement") != nil))) {
+            tooltip.style.opacity = '1'; tooltip.style.transform = 'translate(-50%, 0)';
+          }
           return {desktop: window.codexDesktop === true, loaded: document.readyState === 'complete',
             rendered: !!pet, statusReceived: !!status, errorCount: window.__codexHostErrorCount || 0,
             usageStatus: status?.usageStatus || 'missing', tasksStatus: status?.tasksStatus || 'missing',
@@ -297,6 +488,15 @@ final class DesktopCompanion: NSObject, NSApplicationDelegate, WKScriptMessageHa
             guard let self = self else { return }
             if let result = value as? [String: Any], let json = try? JSONSerialization.data(withJSONObject: result, options: [.sortedKeys]),
                let diagnostics = String(data: json, encoding: .utf8) { print("Desktop diagnostics: \(diagnostics)") }
+            if !self.placementChecks.isEmpty {
+                if let data = try? JSONSerialization.data(withJSONObject: self.placementChecks, options: [.sortedKeys]),
+                   let diagnostics = String(data: data, encoding: .utf8) { print("Desktop placement diagnostics: \(diagnostics)") }
+                if self.placementChecks.values.contains(false) {
+                    fputs("Desktop adaptive placement self-test failed.\n", stderr)
+                    self.finishSelfTest(1)
+                    return
+                }
+            }
             if let error = error as NSError? { print("Desktop JavaScript error: \(error.domain) \(error.code)") }
             guard error == nil, let result = value as? [String: Any], result["desktop"] as? Bool == true,
                   result["loaded"] as? Bool == true, result["rendered"] as? Bool == true,
