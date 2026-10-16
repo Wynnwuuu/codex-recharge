@@ -1,0 +1,20 @@
+import {bundle} from '@remotion/bundler';
+import {selectComposition,renderMedia,renderStill} from '@remotion/renderer';
+import {existsSync,mkdirSync} from 'node:fs';
+import {resolve} from 'node:path';
+import {readStatus,closeTelemetry} from '../telemetry/status.mjs';
+const live=process.argv.includes('--live');
+const still=process.argv.includes('--still');
+const browser=process.env.REMOTION_BROWSER_EXECUTABLE || (existsSync('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome')?'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome':undefined);
+mkdirSync('outputs',{recursive:true});
+let remainingPercent=null;
+if(live){try{const s=await readStatus();remainingPercent=s.remainingPercent;if(s.usageStatus!=='live')throw new Error('Live Codex usage is unavailable; live render aborted.');}finally{closeTelemetry();}}
+const inputProps={mode:live?'usage':'reference',remainingPercent,transparent:false};
+console.log('Bundling Remotion scene…');
+const serveUrl=await bundle({entryPoint:resolve('src/remotion.tsx')});
+console.log('Selecting composition…');
+const composition=await selectComposition({serveUrl,id:live?'CodexUsage':'CodexRecharge',inputProps,browserExecutable:browser});
+const options={serveUrl,composition,inputProps,browserExecutable:browser};
+if(still)await renderStill({...options,frame:150,output:resolve('outputs/codex-recharge.png')});
+else await renderMedia({...options,onProgress:({progress})=>{const p=Math.floor(progress*10);if(p!==globalThis.__renderProgress){globalThis.__renderProgress=p;console.log(`Rendering ${p*10}%`);}},codec:'h264',crf:18,concurrency:4,outputLocation:resolve('outputs/codex-recharge.mp4')});
+console.log(`Rendered outputs/codex-recharge.${still?'png':'mp4'}${live?' using live Codex usage':''}`);
