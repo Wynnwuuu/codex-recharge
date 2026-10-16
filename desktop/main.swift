@@ -198,6 +198,19 @@ final class DesktopCompanion: NSObject, NSApplicationDelegate, WKScriptMessageHa
         case "openCodex":
             recordInteraction(["bridgeOpenRequests": interactionCount("bridgeOpenRequests") + 1])
             openCodex()
+        case "contextMenu":
+            guard let x = body["x"] as? NSNumber, let y = body["y"] as? NSNumber,
+                  x.doubleValue.isFinite, y.doubleValue.isFinite else { return }
+            let clientX = CGFloat(x.doubleValue), clientY = CGFloat(y.doubleValue)
+            let bounds = webView.bounds
+            guard clientX >= 0, clientY >= 0, clientX < bounds.width, clientY < bounds.height else { return }
+            let point = NSPoint(x: bounds.minX + clientX,
+                y: bounds.minY + (webView.isFlipped ? clientY : bounds.height - clientY))
+            let menu = NSMenu()
+            let closeItem = NSMenuItem(title: "关闭摆件", action: #selector(quit), keyEquivalent: "")
+            closeItem.target = self
+            menu.addItem(closeItem)
+            menu.popUp(positioning: nil, at: point, in: webView)
         case "getLayout": updateLayout()
         case "getHover": refreshHover(forcePublish: true)
         case "setHoverRegion":

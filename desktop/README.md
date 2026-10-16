@@ -6,6 +6,8 @@ Drag the companion to reposition it. The task tooltip opens above a companion ne
 
 The `CompanionWebView` accepts the first mouse event while its floating panel is inactive, so the initial press reaches the React interaction handler. The frontend captures the primary pointer on press and remembers whether it ever moves at least 5 screen points from the press location. A drag does not open Codex, including when the pointer returns to its starting position before release. Cancellation and lost pointer capture end the gesture. These describe the implementation; the bridge self-tests below do not verify a physical first click or drag end to end.
 
+Right-click the companion to show a native context menu with **关闭摆件** (Close companion). Choosing it terminates the host and its telemetry helper. The shared frontend suppresses the default WebKit menu only in desktop mode and sends the click location through the `contextMenu` bridge action.
+
 Tooltip visibility uses the actual native screen pointer. Entering the visible rounded card shows it immediately; leaving that card hides it, including when another application is active. The transparent canvas margins, rounded corners outside the card, and tooltip itself do not keep it open. Mouse-only local/global event monitors update the state on movement, with a 30 Hz fallback for missed WebKit exit events. This requires no keyboard monitoring, Accessibility permission, or changes to global settings. The frontend's desktop visibility rule uses the native boolean rather than WebKit's potentially stale `:hover` or focus state.
 
 ```sh

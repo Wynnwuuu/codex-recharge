@@ -80,7 +80,11 @@ function App(){
  return <main className={desktop?'desktop':'preview'} data-placement={placement} data-hovered={hovered} style={desktop?{height:desktopHeight}:undefined}>
  {!desktop&&<header><span className="brand-mark">◈</span><span>CODEX RECHARGE</span><span className="local-badge">本机运行</span></header>}
  <section ref={companionRef} className="companion" data-placement={placement} data-usage-status={status.usageStatus} onPointerEnter={()=>{if(desktop){bridge('getLayout');bridge('getHover');}}} onFocus={()=>{if(desktop)bridge('getLayout');}}>
- <button className="pet" aria-label={`打开 Codex，${usage}，${tasks}`} onPointerDown={e=>{
+ <button className="pet" aria-label={`打开 Codex，${usage}，${tasks}`} onContextMenu={e=>{
+  if(!desktop)return;
+  e.preventDefault();cancelPointer();
+  bridge('contextMenu',{x:e.clientX,y:e.clientY});
+ }} onPointerDown={e=>{
   if(!e.isPrimary||e.button!==0)return;
   down.current={pointerId:e.pointerId,x:e.screenX,y:e.screenY,dragged:false};
   e.currentTarget.setPointerCapture(e.pointerId);

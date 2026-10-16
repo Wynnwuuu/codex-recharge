@@ -25,6 +25,8 @@ open "outputs/Codex Recharge.app"
 
 桌面宿主将未激活窗口的第一次鼠标按下直接交给组件，点击即可打开 Codex。按下时捕获指针，拖动中一旦偏离按下位置达到 5 点，即使返回原处再松开也不会触发打开；取消拖动或失去指针捕获会结束本次手势。
 
+右键点击摆件，在菜单中选择 **关闭摆件** 即可退出。再次双击桌面的应用可重新打开。
+
 ## 数字的含义
 
 - **剩余用量**：通过本机 Codex app-server 的 `account/rateLimits/read` 读取账号额度。优先选择 `rateLimitsByLimitId.codex`，兼容单桶 `rateLimits`；每个有效额度窗口按 `100 - usedPercent` 计算，卡片显示该桶各窗口中最少的剩余百分比。悬停可查看各窗口。这不是 token 余额或付费 credits。
